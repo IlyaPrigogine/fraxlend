@@ -1,10 +1,27 @@
 // SPDX-License-Identifier: ISC
-pragma solidity >=0.8.13;
+pragma solidity >=0.8.15;
 
 interface IFraxlendPair {
+    function CIRCUIT_BREAKER_ADDRESS() external view returns (address);
+
+    function COMPTROLLER_ADDRESS() external view returns (address);
+
+    function DEPLOYER_ADDRESS() external view returns (address);
+
+    function FRAXLEND_WHITELIST_ADDRESS() external view returns (address);
+
+    function TIME_LOCK_ADDRESS() external view returns (address);
+
     function addCollateral(uint256 _collateralAmount, address _borrower) external;
 
-    function addInterest() external returns (uint256 _interestEarned);
+    function addInterest()
+        external
+        returns (
+            uint256 _interestEarned,
+            uint256 _feesAmount,
+            uint256 _feesShare,
+            uint64 _newRate
+        );
 
     function allowance(address owner, address spender) external view returns (uint256);
 
@@ -30,7 +47,9 @@ interface IFraxlendPair {
 
     function borrowerWhitelistActive() external view returns (bool);
 
-    function changeFee(uint16 _newFee) external;
+    function changeFee(uint32 _newFee) external;
+
+    function cleanLiquidationFee() external view returns (uint256);
 
     function collateralContract() external view returns (address);
 
@@ -42,9 +61,9 @@ interface IFraxlendPair {
         external
         view
         returns (
-            uint16 lastBlock,
-            uint16 feeToProtocolRate,
-            uint32 lastTimestamp,
+            uint64 lastBlock,
+            uint64 feeToProtocolRate,
+            uint64 lastTimestamp,
             uint64 ratePerSec
         );
 
@@ -52,11 +71,25 @@ interface IFraxlendPair {
 
     function decreaseAllowance(address spender, uint256 subtractedValue) external returns (bool);
 
-    function deployerContract() external view returns (address);
-
     function deposit(uint256 _amount, address _receiver) external returns (uint256 _sharesReceived);
 
+    function dirtyLiquidationFee() external view returns (uint256);
+
     function exchangeRateInfo() external view returns (uint32 lastTimestamp, uint224 exchangeRate);
+
+    function getConstants()
+        external
+        pure
+        returns (
+            uint256 _LTV_PRECISION,
+            uint256 _LIQ_PRECISION,
+            uint256 _UTIL_PREC,
+            uint256 _FEE_PRECISION,
+            uint256 _EXCHANGE_PRECISION,
+            uint64 _DEFAULT_INT,
+            uint16 _DEFAULT_PROTOCOL_FEE,
+            uint256 _MAX_PROTOCOL_FEE
+        );
 
     function increaseAllowance(address spender, uint256 addedValue) external returns (bool);
 
@@ -65,16 +98,6 @@ interface IFraxlendPair {
         address[] calldata _approvedBorrowers,
         address[] calldata _approvedLenders,
         bytes calldata _rateInitCallData
-    ) external;
-
-    function initializeFirst(
-        bytes calldata _configData,
-        uint256 _maxLTV,
-        uint256 _liquidationFee,
-        uint256 _maturity,
-        uint256 _penaltyRate,
-        bool _isBorrowerWhitelistActive,
-        bool _isLenderWhitelistActive
     ) external;
 
     function lenderWhitelistActive() external view returns (bool);
@@ -87,11 +110,13 @@ interface IFraxlendPair {
         address[] calldata _path
     ) external returns (uint256 _totalCollateralBalance);
 
-    function liquidate(uint256 _shares, address _borrower) external returns (uint256 _collateralForLiquidator);
+    function liquidate(
+        uint128 _sharesToLiquidate,
+        uint256 _deadline,
+        address _borrower
+    ) external returns (uint256 _collateralForLiquidator);
 
-    function liquidationFee() external view returns (uint256);
-
-    function maturity() external view returns (uint256);
+    function maturityDate() external view returns (uint256);
 
     function maxDeposit(address) external pure returns (uint256);
 
@@ -158,9 +183,15 @@ interface IFraxlendPair {
 
     function setSwapper(address _swapper, bool _approval) external;
 
+    function setTimeLock(address _newAddress) external;
+
     function swappers(address) external view returns (bool);
 
     function symbol() external view returns (string calldata);
+
+    function toBorrowAmount(uint256 _shares, bool _roundUp) external view returns (uint256);
+
+    function toBorrowShares(uint256 _amount, bool _roundUp) external view returns (uint256);
 
     function totalAsset() external view returns (uint128 amount, uint128 shares);
 
@@ -189,6 +220,8 @@ interface IFraxlendPair {
     function userBorrowShares(address) external view returns (uint256);
 
     function userCollateralBalance(address) external view returns (uint256);
+
+    function version() external view returns (string calldata);
 
     function withdraw(
         uint256 _amount,

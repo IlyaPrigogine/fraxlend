@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: ISC
-pragma solidity ^0.8.13;
+pragma solidity ^0.8.15;
 
 // ====================================================================
 // |     ______                   _______                             |
@@ -44,23 +44,26 @@ contract FraxlendPair is FraxlendPairCore {
 
     constructor(
         bytes memory _configData,
+        bytes memory _immutables,
         uint256 _maxLTV,
         uint256 _liquidationFee,
-        uint256 _maturity,
+        uint256 _maturityDate,
         uint256 _penaltyRate,
         bool _isBorrowerWhitelistActive,
         bool _isLenderWhitelistActive
     )
         FraxlendPairCore(
             _configData,
+            _immutables,
             _maxLTV,
             _liquidationFee,
-            _maturity,
+            _maturityDate,
             _penaltyRate,
             _isBorrowerWhitelistActive,
             _isLenderWhitelistActive
         )
         ERC20("", "")
+        Ownable()
         Pausable()
     {}
 
@@ -147,11 +150,70 @@ contract FraxlendPair is FraxlendPairCore {
     }
 
     // ============================================================================================
+    // Functions: Helpers
+    // ============================================================================================
+
+    function getConstants()
+        external
+        pure
+        returns (
+            uint256 _LTV_PRECISION,
+            uint256 _LIQ_PRECISION,
+            uint256 _UTIL_PREC,
+            uint256 _FEE_PRECISION,
+            uint256 _EXCHANGE_PRECISION,
+            uint64 _DEFAULT_INT,
+            uint16 _DEFAULT_PROTOCOL_FEE,
+            uint256 _MAX_PROTOCOL_FEE
+        )
+    {
+        _LTV_PRECISION = LTV_PRECISION;
+        _LIQ_PRECISION = LIQ_PRECISION;
+        _UTIL_PREC = UTIL_PREC;
+        _FEE_PRECISION = FEE_PRECISION;
+        _EXCHANGE_PRECISION = EXCHANGE_PRECISION;
+        _DEFAULT_INT = DEFAULT_INT;
+        _DEFAULT_PROTOCOL_FEE = DEFAULT_PROTOCOL_FEE;
+        _MAX_PROTOCOL_FEE = MAX_PROTOCOL_FEE;
+    }
+
+    /// @notice The ```toBorrowShares``` function converts a given amount of borrow debt into the number of shares
+    /// @param _amount Amount of borrow
+    /// @param _roundUp Whether to roundup during division
+    function toBorrowShares(uint256 _amount, bool _roundUp) external view returns (uint256) {
+        return totalBorrow.toShares(_amount, _roundUp);
+    }
+
+    /// @notice The ```toBorrtoBorrowAmountowShares``` function converts a given amount of borrow debt into the number of shares
+    /// @param _shares Shares of borrow
+    /// @param _roundUp Whether to roundup during division
+    function toBorrowAmount(uint256 _shares, bool _roundUp) external view returns (uint256) {
+        return totalBorrow.toAmount(_shares, _roundUp);
+    }
+
+    // ============================================================================================
     // Functions: Protocol Configuration (Fees & Swap Contracts)
     // ============================================================================================
+    /// @notice The ```SetTimeLock``` event fires when the TIME_LOCK_ADDRESS is set
+    /// @param _oldAddress The original address
+    /// @param _newAddress The new address
+    event SetTimeLock(address _oldAddress, address _newAddress);
+
+    /// @notice The ```setTimeLock``` function sets the TIME_LOCK address
+    /// @param _newAddress the new time lock address
+    function setTimeLock(address _newAddress) external onlyOwner {
+        emit SetTimeLock(TIME_LOCK_ADDRESS, _newAddress);
+        TIME_LOCK_ADDRESS = _newAddress;
+    }
+
+    /// @notice The ```ChangeFee``` event first when the fee is changed
+    /// @param _newFee The new fee
     event ChangeFee(uint32 _newFee);
 
-    function changeFee(uint16 _newFee) external whenNotPaused onlyOwner {
+    /// @notice The ```changeFee``` function changes the protocol fee, max 50%
+    /// @param _newFee The new fee
+    function changeFee(uint32 _newFee) external whenNotPaused {
+        if (msg.sender != TIME_LOCK_ADDRESS) revert OnlyTimeLock();
         if (_newFee > MAX_PROTOCOL_FEE) {
             revert BadProtocolFee();
         }
@@ -159,8 +221,16 @@ contract FraxlendPair is FraxlendPairCore {
         emit ChangeFee(_newFee);
     }
 
+    /// @notice The ```WithdrawFees``` event fires when the fees are withdrawn
+    /// @param _shares Number of _shares (fTokens) redeemed
+    /// @param _recipient To whom the assets were sent
+    /// @param _amountToTransfer The amount of fees redeemed
     event WithdrawFees(uint128 _shares, address _recipient, uint256 _amountToTransfer);
 
+    /// @notice The ```withdrawFees``` function withdraws fees accumulated
+    /// @param _shares Number of fTokens to redeem
+    /// @param _recipient Address to send the assets
+    /// @return _amountToTransfer Amount of assets sent to recipient
     function withdrawFees(uint128 _shares, address _recipient) external onlyOwner returns (uint256 _amountToTransfer) {
         // Grab some data from state to save gas
         VaultAccount memory _totalAsset = totalAsset;
@@ -192,31 +262,75 @@ contract FraxlendPair is FraxlendPairCore {
         emit WithdrawFees(_shares, _recipient, _amountToTransfer);
     }
 
+    /// @notice The ```SetSwapper``` event fires whenever a swapper is black or whitelisted
+    /// @param _swapper The swapper address
+    /// @param _approval The approval
     event SetSwapper(address _swapper, bool _approval);
 
+    /// @notice The ```setSwapper``` function is called to black or whitelist a given swapper address
+    /// @dev
+    /// @param _swapper The swapper address
+    /// @param _approval The approval
     function setSwapper(address _swapper, bool _approval) external onlyOwner {
         swappers[_swapper] = _approval;
         emit SetSwapper(_swapper, _approval);
     }
 
+    /// @notice The ```SetApprovedLender``` event fires when a lender is black or whitelisted
+    /// @param _address The address
+    /// @param _approval The approval
+    event SetApprovedLender(address indexed _address, bool _approval);
+
+    /// @notice The ```setApprovedLenders``` function sets a given set of addresses to the whitelist
+    /// @dev Cannot black list self
+    /// @param _lenders The addresses whos status will be set
+    /// @param _approval The approcal status
     function setApprovedLenders(address[] calldata _lenders, bool _approval) external approvedLender(msg.sender) {
         for (uint256 i = 0; i < _lenders.length; i++) {
-            approvedLenders[_lenders[i]] = _approval;
+            // Do not set when _approval == false and _lender == msg.sender
+            if (_approval || _lenders[i] != msg.sender) {
+                approvedLenders[_lenders[i]] = _approval;
+                emit SetApprovedLender(_lenders[i], _approval);
+            }
         }
     }
 
+    /// @notice The ```SetApprovedBorrower``` event fires when a borrower is black or whitelisted
+    /// @param _address The address
+    /// @param _approval The approval
+    event SetApprovedBorrower(address indexed _address, bool _approval);
+
+    /// @notice The ```setApprovedBorrowers``` function sets a given array of addresses to the whitelist
+    /// @dev Cannot black list self
+    /// @param _borrowers The addresses whos status will be set
+    /// @param _approval The approcal status
     function setApprovedBorrowers(address[] calldata _borrowers, bool _approval) external approvedBorrower {
         for (uint256 i = 0; i < _borrowers.length; i++) {
-            approvedBorrowers[_borrowers[i]] = _approval;
+            // Do not set when _approval == false and _borrower == msg.sender
+            if (_approval || _borrowers[i] != msg.sender) {
+                approvedBorrowers[_borrowers[i]] = _approval;
+                emit SetApprovedBorrower(_borrowers[i], _approval);
+            }
         }
     }
 
-    function pause() external whenNotPaused onlyByProtocolOrOwner {
+    function pause() external {
+        if (
+            msg.sender != CIRCUIT_BREAKER_ADDRESS &&
+            msg.sender != COMPTROLLER_ADDRESS &&
+            msg.sender != owner() &&
+            msg.sender != DEPLOYER_ADDRESS
+        ) {
+            revert ProtocolOrOwnerOnly();
+        }
         _addInterest(); // accrue any interest prior to pausing as it won't accrue during pause
         _pause();
     }
 
-    function unpause() external whenPaused onlyByProtocolOrOwner {
+    function unpause() external {
+        if (msg.sender != COMPTROLLER_ADDRESS && msg.sender != owner()) {
+            revert ProtocolOrOwnerOnly();
+        }
         // Resets the lastTimestamp which has the effect of no interest accruing over the pause period
         _addInterest();
         _unpause();
